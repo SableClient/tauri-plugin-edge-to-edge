@@ -1,379 +1,475 @@
 package com.plugin.edgetoedge
 
 import android.app.Activity
+import android.content.res.Configuration
 import android.graphics.Color
+import android.net.Uri
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebView
-import android.widget.FrameLayout
+import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsAnimationCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.webkit.JavaScriptReplyProxy
+import androidx.webkit.ScriptHandler
+import androidx.webkit.WebMessageCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import app.tauri.annotation.Command
 import app.tauri.annotation.TauriPlugin
+import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
-import app.tauri.plugin.Invoke
+import java.util.Locale
 
-/**
- * Edge-to-Edge 插件 - Android 实现
- * 完美复制 Capacitor 版本的实现逻辑
- * 为 Android 提供全屏沉浸式体验支持
- */
 @TauriPlugin
-class EdgeToEdgePlugin(private val activity: Activity): Plugin(activity) {
-    private val mainHandler = Handler(Looper.getMainLooper())
+class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
     private var webView: WebView? = null
+    private var insetHostView: View? = null
+    private var viewportCoverScriptHandler: ScriptHandler? = null
     private var cachedInsets = SafeAreaInsets(0, 0, 0, 0)
-    private var lastKeyboardHeight = 0
-    private var lastKeyboardVisible = false
-    
+    private var cachedRawInsets = SafeAreaInsets(0, 0, 0, 0)
+    private var cachedKeyboardHeight = 0
+    private var cachedKeyboardVisible = false
+    private var hasViewportCover = false
+
     data class SafeAreaInsets(val top: Int, val right: Int, val bottom: Int, val left: Int)
-    
+
+    companion object {
+        private const val DOM_READY_BRIDGE = "EdgeToEdgeAndroid"
+        private const val DOM_READY_MESSAGE = "dom-ready"
+        private const val WEBVIEW_VERSION_WITH_SAFE_AREA_FIX = 140
+        private const val WEBVIEW_VERSION_WITH_SAFE_AREA_KEYBOARD_FIX = 144
+        private val EMPTY_INSETS = Insets.of(0, 0, 0, 0)
+        private val ALLOWED_ORIGIN_RULES = setOf("*")
+        private val VIEWPORT_META_JS_FUNCTION = """
+            (function() {
+                const meta = document.querySelectorAll("meta[name=viewport]");
+                if (meta.length === 0) {
+                    return false;
+                }
+                const metaContent = meta[meta.length - 1].content || "";
+                return metaContent.includes("viewport-fit=cover");
+            })();
+        """.trimIndent()
+        private val DOCUMENT_START_SCRIPT = """
+            (function() {
+                if (window.__edgeToEdgeDomReadyHookInstalled) {
+                    return;
+                }
+                window.__edgeToEdgeDomReadyHookInstalled = true;
+
+                function notifyDomReady() {
+                    if (window.__edgeToEdgeDomReadyNotified) {
+                        return;
+                    }
+                    window.__edgeToEdgeDomReadyNotified = true;
+                    try {
+                        window.EdgeToEdgeAndroid.postMessage("dom-ready");
+                    } catch (_) {
+                    }
+                }
+
+                if (document.readyState === "loading") {
+                    document.addEventListener("DOMContentLoaded", notifyDomReady, { once: true });
+                } else {
+                    notifyDomReady();
+                }
+            })();
+        """.trimIndent()
+    }
+
     override fun load(webView: WebView) {
         super.load(webView)
         this.webView = webView
-        
+        this.insetHostView = resolveInsetHostView(webView)
+
         activity.runOnUiThread {
-            // 1. 启用 Edge-to-Edge 模式
             enable()
-            
-            // 2. 设置透明系统栏
             setTransparentSystemBars()
-            
-            // 3. 设置系统栏图标颜色
             setSystemBarAppearance()
-            
-            // 4. 设置键盘动画监听器 (Capacitor 官方 Keyboard 插件方式)
+            setupViewportCoverDetection(webView)
+            refreshViewportCoverState(webView)
             setupKeyboardAnimationListener()
-            
-            // 5. 设置 WindowInsets 监听器
             setupWindowInsetsListener()
+            requestApplyInsets()
         }
-        
-        println("[EdgeToEdge] Plugin loaded successfully (Capacitor style)")
+
+        println("[EdgeToEdge] Plugin loaded successfully")
     }
-    
-    /**
-     * 启用 Edge-to-Edge 模式 (内容绘制到系统栏后面)
-     * 复制自 Capacitor EdgeToEdge.enable()
-     */
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        activity.runOnUiThread {
+            setSystemBarAppearance()
+            requestApplyInsets()
+        }
+    }
+
+    override fun onDestroy() {
+        val currentWebView = webView ?: return
+
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            viewportCoverScriptHandler?.remove()
+            viewportCoverScriptHandler = null
+        }
+
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            WebViewCompat.removeWebMessageListener(currentWebView, DOM_READY_BRIDGE)
+        }
+    }
+
     private fun enable() {
-        val window = activity.window
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowCompat.setDecorFitsSystemWindows(activity.window, false)
         println("[EdgeToEdge] Edge-to-edge mode enabled")
     }
-    
-    /**
-     * 设置透明系统栏
-     * 复制自 Capacitor EdgeToEdge.setTransparentSystemBars()
-     */
+
     private fun setTransparentSystemBars() {
         val window = activity.window
-        
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
-        
-        // Android 10+ 禁用导航栏对比度保护
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.isNavigationBarContrastEnforced = false
         }
-        
+
         println("[EdgeToEdge] System bars set to transparent")
     }
-    
-    /**
-     * 设置系统栏图标颜色 (亮色/暗色)
-     * 复制自 Capacitor EdgeToEdge.setSystemBarAppearance()
-     */
+
     private fun setSystemBarAppearance() {
         val window = activity.window
         val decorView = window.decorView
-        
-        // 根据当前主题设置系统栏图标颜色
-        val isDarkTheme = (activity.resources.configuration.uiMode and
-            android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
-            android.content.res.Configuration.UI_MODE_NIGHT_YES
-        
+        val isDarkTheme =
+            (activity.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+
         WindowCompat.getInsetsController(window, decorView)?.apply {
-            // 暗色主题 = 亮色图标, 亮色主题 = 暗色图标
             isAppearanceLightStatusBars = !isDarkTheme
             isAppearanceLightNavigationBars = !isDarkTheme
         }
-        
-        println("[EdgeToEdge] System bar appearance set (isDark: $isDarkTheme)")
     }
-    
-    /**
-     * 设置键盘动画监听器 (Capacitor Keyboard 官方插件方式)
-     * 使用 WindowInsetsAnimationCompat.Callback 实现精确的键盘动画追踪
-     * 完美复制自 Capacitor EdgeToEdge.setupKeyboardListener()
-     */
-    private fun setupKeyboardAnimationListener() {
-        val content = activity.window.decorView.findViewById<FrameLayout>(android.R.id.content)
-        val rootView = content.rootView
-        
-        ViewCompat.setWindowInsetsAnimationCallback(
-            rootView,
-            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_STOP) {
-                override fun onProgress(
-                    insets: WindowInsetsCompat,
-                    runningAnimations: MutableList<WindowInsetsAnimationCompat>
-                ): WindowInsetsCompat {
-                    return insets
-                }
-                
-                override fun onStart(
-                    animation: WindowInsetsAnimationCompat,
-                    bounds: WindowInsetsAnimationCompat.BoundsCompat
-                ): WindowInsetsAnimationCompat.BoundsCompat {
-                    val windowInsets = ViewCompat.getRootWindowInsets(rootView)
-                    val showingKeyboard = windowInsets?.isVisible(WindowInsetsCompat.Type.ime()) ?: false
-                    val imeHeightPx = windowInsets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
-                    
-                    // 转换为 DP
-                    val density = activity.resources.displayMetrics.density
-                    val imeHeightDp = Math.round(imeHeightPx / density)
-                    
-                    if (showingKeyboard) {
-                        println("[EdgeToEdge] Keyboard will show - Height: ${imeHeightDp}dp")
-                        // 键盘将要显示时注入
-                        injectSafeAreaToWebView(cachedInsets, true, imeHeightPx)
-                    } else {
-                        println("[EdgeToEdge] Keyboard will hide")
-                        // 键盘将要隐藏时注入
-                        injectSafeAreaToWebView(cachedInsets, false, 0)
+
+    private fun setupViewportCoverDetection(webView: WebView) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) ||
+            !WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+        ) {
+            println("[EdgeToEdge] Document-start viewport bridge unavailable; using direct viewport checks only")
+            return
+        }
+
+        WebViewCompat.addWebMessageListener(
+            webView,
+            DOM_READY_BRIDGE,
+            ALLOWED_ORIGIN_RULES,
+            object : WebViewCompat.WebMessageListener {
+                override fun onPostMessage(
+                    view: WebView,
+                    message: WebMessageCompat,
+                    sourceOrigin: Uri,
+                    isMainFrame: Boolean,
+                    replyProxy: JavaScriptReplyProxy,
+                ) {
+                    if (!isMainFrame || message.data != DOM_READY_MESSAGE) {
+                        return
                     }
-                    
-                    return super.onStart(animation, bounds)
+
+                    refreshViewportCoverState(view)
                 }
-                
-                override fun onEnd(animation: WindowInsetsAnimationCompat) {
-                    super.onEnd(animation)
-                    val windowInsets = ViewCompat.getRootWindowInsets(rootView)
-                    val showingKeyboard = windowInsets?.isVisible(WindowInsetsCompat.Type.ime()) ?: false
-                    val imeHeightPx = windowInsets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
-                    
-                    // 转换为 DP
-                    val density = activity.resources.displayMetrics.density
-                    val imeHeightDp = Math.round(imeHeightPx / density)
-                    
-                    lastKeyboardVisible = showingKeyboard
-                    lastKeyboardHeight = imeHeightPx
-                    
-                    if (showingKeyboard) {
-                        println("[EdgeToEdge] Keyboard did show - Height: ${imeHeightDp}dp")
-                    } else {
-                        println("[EdgeToEdge] Keyboard did hide")
-                    }
-                    
-                    // 键盘动画结束后再次注入确保状态正确
-                    injectSafeAreaToWebView(cachedInsets, showingKeyboard, imeHeightPx)
-                }
-            }
+            },
         )
-        
-        println("[EdgeToEdge] Keyboard animation listener setup complete (Capacitor Keyboard official approach)")
+
+        viewportCoverScriptHandler = WebViewCompat.addDocumentStartJavaScript(
+            webView,
+            DOCUMENT_START_SCRIPT,
+            ALLOWED_ORIGIN_RULES,
+        )
+
+        webView.evaluateJavascript(DOCUMENT_START_SCRIPT, null)
     }
-    
-    /**
-     * 设置 WindowInsets 监听器
-     * 用于获取系统栏 insets 并注入到 WebView
-     */
-    private fun setupWindowInsetsListener() {
-        ViewCompat.setOnApplyWindowInsetsListener(activity.window.decorView) { view, windowInsets ->
-            val systemBarsInsets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val imeInsets = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
-            val imeHeight = imeInsets.bottom
-            val isKeyboardVisible = windowInsets.isVisible(WindowInsetsCompat.Type.ime())
-            
-            val newInsets = SafeAreaInsets(
-                top = systemBarsInsets.top,
-                right = systemBarsInsets.right,
-                bottom = systemBarsInsets.bottom,
-                left = systemBarsInsets.left
-            )
-            
-            // 缓存 insets
-            cachedInsets = newInsets
-            
-            // 注入安全区域 (键盘状态由 animation callback 处理，这里只处理系统栏)
-            if (!isKeyboardVisible) {
-                injectSafeAreaToWebView(cachedInsets, false, 0)
-            }
-            
-            println("[EdgeToEdge] WindowInsets - Top:${newInsets.top}, Bottom:${newInsets.bottom}, Keyboard:$isKeyboardVisible($imeHeight)")
-            
-            windowInsets
+
+    private fun refreshViewportCoverState(targetWebView: WebView) {
+        targetWebView.evaluateJavascript(VIEWPORT_META_JS_FUNCTION) { result ->
+            hasViewportCover = result == "true"
+            requestApplyInsets()
         }
     }
-    
-    /**
-     * 注入安全区域到 WebView
-     */
+
+    private fun setupKeyboardAnimationListener() {
+        val hostView = requireInsetHostView()
+
+        ViewCompat.setWindowInsetsAnimationCallback(
+            hostView,
+            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_STOP) {
+                override fun onProgress(
+                    windowInsets: WindowInsetsCompat,
+                    runningAnimations: MutableList<WindowInsetsAnimationCompat>,
+                ): WindowInsetsCompat {
+                    syncInjectedInsets(
+                        currentInjectedSafeArea(windowInsets),
+                        windowInsets.isVisible(WindowInsetsCompat.Type.ime()),
+                        windowInsets.getInsets(WindowInsetsCompat.Type.ime()).bottom,
+                    )
+
+                    return windowInsets
+                }
+
+                override fun onEnd(animation: WindowInsetsAnimationCompat) {
+                    super.onEnd(animation)
+
+                    val rootWindowInsets = ViewCompat.getRootWindowInsets(hostView) ?: return
+                    syncInjectedInsets(
+                        currentInjectedSafeArea(rootWindowInsets),
+                        rootWindowInsets.isVisible(WindowInsetsCompat.Type.ime()),
+                        rootWindowInsets.getInsets(WindowInsetsCompat.Type.ime()).bottom,
+                    )
+                }
+            },
+        )
+    }
+
+    private fun setupWindowInsetsListener() {
+        val hostView = requireInsetHostView()
+
+        ViewCompat.setOnApplyWindowInsetsListener(hostView) { view, windowInsets ->
+            val systemBarsInsets = windowInsets.getInsets(systemBarsAndCutoutMask())
+            val imeInsets = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
+            val keyboardVisible = windowInsets.isVisible(WindowInsetsCompat.Type.ime())
+            val rawSafeAreaInsets = calcSafeAreaInsets(windowInsets)
+
+            cachedRawInsets = rawSafeAreaInsets.toSafeAreaInsets()
+
+            if (hasViewportCover && getWebViewMajorVersion() >= WEBVIEW_VERSION_WITH_SAFE_AREA_FIX) {
+                view.setPadding(0, 0, 0, if (keyboardVisible) imeInsets.bottom else 0)
+                syncInjectedInsets(rawSafeAreaInsets, keyboardVisible, imeInsets.bottom)
+
+                return@setOnApplyWindowInsetsListener WindowInsetsCompat.Builder(windowInsets)
+                    .setInsets(
+                        systemBarsAndCutoutMask(),
+                        Insets.of(
+                            systemBarsInsets.left,
+                            systemBarsInsets.top,
+                            systemBarsInsets.right,
+                            getBottomInset(systemBarsInsets, keyboardVisible),
+                        ),
+                    )
+                    .build()
+            }
+
+            view.setPadding(
+                systemBarsInsets.left,
+                systemBarsInsets.top,
+                systemBarsInsets.right,
+                if (keyboardVisible) imeInsets.bottom else systemBarsInsets.bottom,
+            )
+
+            val rewrittenInsets = WindowInsetsCompat.Builder(windowInsets)
+                .setInsets(systemBarsAndCutoutMask(), Insets.of(0, 0, 0, 0))
+                .build()
+
+            syncInjectedInsets(calcSafeAreaInsets(rewrittenInsets), keyboardVisible, imeInsets.bottom)
+            rewrittenInsets
+        }
+    }
+
+    private fun currentInjectedSafeArea(windowInsets: WindowInsetsCompat): Insets {
+        return if (hasViewportCover && getWebViewMajorVersion() >= WEBVIEW_VERSION_WITH_SAFE_AREA_FIX) {
+            calcSafeAreaInsets(windowInsets)
+        } else {
+            EMPTY_INSETS
+        }
+    }
+
+    private fun syncInjectedInsets(
+        insets: Insets,
+        keyboardVisible: Boolean,
+        keyboardHeight: Int,
+    ) {
+        cachedInsets = insets.toSafeAreaInsets()
+        cachedKeyboardVisible = keyboardVisible
+        cachedKeyboardHeight = keyboardHeight
+        injectSafeAreaToWebView(cachedInsets, keyboardVisible, keyboardHeight)
+    }
+
     private fun injectSafeAreaToWebView(
         insets: SafeAreaInsets,
         isKeyboardVisible: Boolean = false,
-        keyboardHeight: Int = 0
+        keyboardHeight: Int = 0,
     ) {
-        webView?.let { wv ->
-            val density = activity.resources.displayMetrics.density
-            val topDp = insets.top / density
-            val rightDp = insets.right / density
-            val bottomDp = insets.bottom / density
-            val leftDp = insets.left / density
-            val keyboardDp = keyboardHeight / density
-            val computedBottom = maxOf(bottomDp, 48f)
-            
-            val jsCode = """
-                (function() {
-                    var style = document.documentElement.style;
-                    style.setProperty('--safe-area-inset-top', '${topDp}px');
-                    style.setProperty('--safe-area-inset-right', '${rightDp}px');
-                    style.setProperty('--safe-area-inset-bottom', '${bottomDp}px');
-                    style.setProperty('--safe-area-inset-left', '${leftDp}px');
-                    style.setProperty('--safe-area-top', '${topDp}px');
-                    style.setProperty('--safe-area-right', '${rightDp}px');
-                    style.setProperty('--safe-area-bottom', '${bottomDp}px');
-                    style.setProperty('--safe-area-left', '${leftDp}px');
-                    style.setProperty('--safe-area-bottom-computed', '${computedBottom}px');
-                    style.setProperty('--safe-area-bottom-min', '48px');
-                    style.setProperty('--content-bottom-padding', '${computedBottom + 16}px');
-                    style.setProperty('--keyboard-height', '${keyboardDp}px');
-                    style.setProperty('--keyboard-visible', '${if (isKeyboardVisible) "1" else "0"}');
-                    window.dispatchEvent(new CustomEvent('safeAreaChanged', {
-                        detail: { 
-                            top: $topDp, 
-                            right: $rightDp, 
-                            bottom: $bottomDp, 
-                            left: $leftDp, 
-                            keyboardHeight: $keyboardDp, 
-                            keyboardVisible: $isKeyboardVisible 
-                        }
-                    }));
-                })();
-            """.trimIndent()
-            
-            wv.evaluateJavascript(jsCode, null)
+        val currentWebView = webView ?: return
+
+        val topDp = toDpString(insets.top)
+        val rightDp = toDpString(insets.right)
+        val bottomDp = toDpString(insets.bottom)
+        val leftDp = toDpString(insets.left)
+        val keyboardDp = toDpString(keyboardHeight)
+
+        val jsCode = """
+            (function() {
+                var style = document.documentElement.style;
+                style.setProperty('--safe-area-inset-top', '${topDp}px');
+                style.setProperty('--safe-area-inset-right', '${rightDp}px');
+                style.setProperty('--safe-area-inset-bottom', '${bottomDp}px');
+                style.setProperty('--safe-area-inset-left', '${leftDp}px');
+                style.setProperty('--safe-area-top', '${topDp}px');
+                style.setProperty('--safe-area-right', '${rightDp}px');
+                style.setProperty('--safe-area-bottom', '${bottomDp}px');
+                style.setProperty('--safe-area-left', '${leftDp}px');
+                style.setProperty('--keyboard-height', '${keyboardDp}px');
+                style.setProperty('--keyboard-visible', '${if (isKeyboardVisible) "1" else "0"}');
+                window.dispatchEvent(new CustomEvent('safeAreaChanged', {
+                    detail: {
+                        top: $topDp,
+                        right: $rightDp,
+                        bottom: $bottomDp,
+                        left: $leftDp,
+                        keyboardHeight: $keyboardDp,
+                        keyboardVisible: $isKeyboardVisible
+                    }
+                }));
+            })();
+        """.trimIndent()
+
+        currentWebView.evaluateJavascript(jsCode, null)
+    }
+
+    private fun calcSafeAreaInsets(windowInsets: WindowInsetsCompat): Insets {
+        val safeArea = windowInsets.getInsets(systemBarsAndCutoutMask())
+        return if (windowInsets.isVisible(WindowInsetsCompat.Type.ime())) {
+            Insets.of(safeArea.left, safeArea.top, safeArea.right, 0)
+        } else {
+            Insets.of(safeArea.left, safeArea.top, safeArea.right, safeArea.bottom)
         }
     }
-    
-    /**
-     * 获取安全区域 insets
-     */
+
+    private fun requestApplyInsets() {
+        requireInsetHostView().requestApplyInsets()
+        webView?.requestApplyInsets()
+    }
+
+    private fun resolveInsetHostView(webView: WebView): View {
+        return (webView.parent as? View)
+            ?: activity.window.decorView.findViewById(android.R.id.content)
+    }
+
+    private fun requireInsetHostView(): View {
+        val currentHostView = insetHostView
+        if (currentHostView != null) {
+            return currentHostView
+        }
+
+        val currentWebView = webView ?: error("WebView has not been loaded yet")
+        return resolveInsetHostView(currentWebView).also { insetHostView = it }
+    }
+
+    private fun toDpString(px: Int): String {
+        val density = activity.resources.displayMetrics.density
+        val dp = px.toFloat() / density
+        return String.format(Locale.US, "%.4f", dp)
+    }
+
+    private fun getWebViewMajorVersion(): Int {
+        val info = WebViewCompat.getCurrentWebViewPackage(activity)
+        val versionName = info?.versionName ?: return 0
+        return versionName.split(".").firstOrNull()?.toIntOrNull() ?: 0
+    }
+
+    private fun getBottomInset(systemBarsInsets: Insets, keyboardVisible: Boolean): Int {
+        if (getWebViewMajorVersion() < WEBVIEW_VERSION_WITH_SAFE_AREA_KEYBOARD_FIX && keyboardVisible) {
+            return 0
+        }
+
+        return systemBarsInsets.bottom
+    }
+
+    private fun systemBarsAndCutoutMask(): Int {
+        return WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+    }
+
+    private fun Insets.toSafeAreaInsets(): SafeAreaInsets {
+        return SafeAreaInsets(top, right, bottom, left)
+    }
+
+    private fun SafeAreaInsets.topDp(): Float = top.toFloat() / activity.resources.displayMetrics.density
+    private fun SafeAreaInsets.rightDp(): Float = right.toFloat() / activity.resources.displayMetrics.density
+    private fun SafeAreaInsets.bottomDp(): Float = bottom.toFloat() / activity.resources.displayMetrics.density
+    private fun SafeAreaInsets.leftDp(): Float = left.toFloat() / activity.resources.displayMetrics.density
+
     @Command
     fun getSafeAreaInsets(invoke: Invoke) {
         val density = activity.resources.displayMetrics.density
-        val decorView = activity.window.decorView
-        val windowInsets = ViewCompat.getRootWindowInsets(decorView)
-        
+        val rootWindowInsets = ViewCompat.getRootWindowInsets(requireInsetHostView())
+        val safeAreaInsets = rootWindowInsets?.let { calcSafeAreaInsets(it).toSafeAreaInsets() } ?: cachedRawInsets
+        val statusBars = rootWindowInsets?.getInsets(WindowInsetsCompat.Type.statusBars()) ?: EMPTY_INSETS
+        val navigationBars = rootWindowInsets?.getInsets(WindowInsetsCompat.Type.navigationBars()) ?: EMPTY_INSETS
+
         val result = JSObject()
-        
-        if (windowInsets != null) {
-            val systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val statusBars = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars())
-            val navigationBars = windowInsets.getInsets(WindowInsetsCompat.Type.navigationBars())
-            
-            result.put("statusBar", statusBars.top / density)
-            result.put("navigationBar", navigationBars.bottom / density)
-            result.put("top", systemBars.top / density)
-            result.put("bottom", systemBars.bottom / density)
-            result.put("left", systemBars.left / density)
-            result.put("right", systemBars.right / density)
-        } else {
-            result.put("statusBar", 0)
-            result.put("navigationBar", 0)
-            result.put("top", cachedInsets.top / density)
-            result.put("bottom", cachedInsets.bottom / density)
-            result.put("left", cachedInsets.left / density)
-            result.put("right", cachedInsets.right / density)
-        }
-        
+        result.put("statusBar", statusBars.top / density)
+        result.put("navigationBar", navigationBars.bottom / density)
+        result.put("top", safeAreaInsets.topDp())
+        result.put("bottom", safeAreaInsets.bottomDp())
+        result.put("left", safeAreaInsets.leftDp())
+        result.put("right", safeAreaInsets.rightDp())
         invoke.resolve(result)
     }
-    
-    /**
-     * 获取键盘信息
-     * 复制自 Capacitor EdgeToEdge.getKeyboardInfo()
-     */
+
     @Command
     fun getKeyboardInfo(invoke: Invoke) {
-        val decorView = activity.window.decorView
-        val windowInsets = ViewCompat.getRootWindowInsets(decorView)
-        
+        val density = activity.resources.displayMetrics.density
+        val rootWindowInsets = ViewCompat.getRootWindowInsets(requireInsetHostView())
+
+        val keyboardVisible = rootWindowInsets?.isVisible(WindowInsetsCompat.Type.ime()) ?: cachedKeyboardVisible
+        val keyboardHeightPx = rootWindowInsets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: cachedKeyboardHeight
+
         val result = JSObject()
-        
-        if (windowInsets != null) {
-            val imeVisible = windowInsets.isVisible(WindowInsetsCompat.Type.ime())
-            val imeHeightPx = windowInsets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-            val density = activity.resources.displayMetrics.density
-            val imeHeightDp = Math.round(imeHeightPx / density)
-            
-            result.put("keyboardHeight", imeHeightDp)
-            result.put("isVisible", imeVisible)
-        } else {
-            result.put("keyboardHeight", 0)
-            result.put("isVisible", false)
-        }
-        
+        result.put("keyboardHeight", keyboardHeightPx / density)
+        result.put("isVisible", keyboardVisible)
         invoke.resolve(result)
     }
-    
+
     @Command
     fun enable(invoke: Invoke) {
-        activity.runOnUiThread { 
+        activity.runOnUiThread {
             enable()
             setTransparentSystemBars()
+            setSystemBarAppearance()
+            webView?.let { refreshViewportCoverState(it) }
+            requestApplyInsets()
         }
         invoke.resolve()
     }
-    
+
     @Command
     fun disable(invoke: Invoke) {
         activity.runOnUiThread {
             WindowCompat.setDecorFitsSystemWindows(activity.window, true)
+            requireInsetHostView().setPadding(0, 0, 0, 0)
+            syncInjectedInsets(EMPTY_INSETS, false, 0)
             println("[EdgeToEdge] Edge-to-edge mode disabled")
         }
         invoke.resolve()
     }
-    
-    /**
-     * 显示键盘
-     * 复制自 Capacitor EdgeToEdge.showKeyboard()
-     */
+
     @Command
     fun showKeyboard(invoke: Invoke) {
         activity.runOnUiThread {
-            val currentFocus = activity.currentFocus
+            val currentFocus = activity.currentFocus ?: webView
             if (currentFocus != null) {
                 val imm = activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as InputMethodManager
                 imm.showSoftInput(currentFocus, 0)
-                println("[EdgeToEdge] Keyboard show requested")
-            } else {
-                println("[EdgeToEdge] Cannot show keyboard - no focused view")
             }
         }
         invoke.resolve()
     }
-    
-    /**
-     * 隐藏键盘
-     * 复制自 Capacitor EdgeToEdge.hideKeyboard()
-     */
+
     @Command
     fun hideKeyboard(invoke: Invoke) {
         activity.runOnUiThread {
             val imm = activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as InputMethodManager
-            val currentFocus = activity.currentFocus
+            val currentFocus = activity.currentFocus ?: webView
             if (currentFocus != null) {
                 imm.hideSoftInputFromWindow(currentFocus.windowToken, InputMethodManager.HIDE_NOT_ALWAYS)
-                println("[EdgeToEdge] Keyboard hide requested")
-            } else {
-                println("[EdgeToEdge] Cannot hide keyboard - no focused view")
             }
         }
         invoke.resolve()

@@ -41,7 +41,6 @@ pub fn run() {
 | `--safe-area-inset-bottom` | 底部安全区域 (Home Indicator) |
 | `--safe-area-top` | 同上（别名） |
 | `--safe-area-bottom` | 同上（别名） |
-| `--safe-area-bottom-computed` | 计算后的底部区域 |
 | `--keyboard-height` | 键盘高度 |
 | `--keyboard-visible` | 键盘是否可见 (1/0) |
 
@@ -50,7 +49,7 @@ pub fn run() {
 ```css
 .app-container {
   padding-top: var(--safe-area-top, 0px);
-  padding-bottom: var(--safe-area-bottom-computed, 0px);
+  padding-bottom: var(--safe-area-bottom, 0px);
 }
 
 .bottom-input {
@@ -58,6 +57,33 @@ pub fn run() {
   bottom: 0;
   padding-bottom: var(--safe-area-bottom, 0px);
 }
+```
+
+### JavaScript API
+
+```ts
+import {
+  disable,
+  enable,
+  getKeyboardInfo,
+  getSafeAreaInsets,
+  hideKeyboard,
+  onSafeAreaChanged,
+  showKeyboard,
+} from 'tauri-plugin-edge-to-edge-api'
+
+const insets = await getSafeAreaInsets()
+const keyboard = await getKeyboardInfo()
+
+const unlisten = onSafeAreaChanged((detail) => {
+  console.log(detail.top, detail.bottom, detail.keyboardHeight, detail.keyboardVisible)
+})
+
+await enable()
+await showKeyboard()
+await hideKeyboard()
+await disable()
+unlisten()
 ```
 
 ### 事件监听

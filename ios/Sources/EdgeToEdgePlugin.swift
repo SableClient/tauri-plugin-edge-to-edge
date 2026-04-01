@@ -12,7 +12,6 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
     private weak var webviewRef: WKWebView?
     private var keyboardHeight: CGFloat = 0
     private var isKeyboardVisible = false
-    private var hideTimer: Timer?
     private var stageManagerOffset: CGFloat = 0  // iPad Stage Manager 支持
     private var keyboardStateVersion: Int = 0  // 状态版本号，用于取消过期的回调
     private var periodicInjectionCompleted = false  // 周期性注入是否完成
@@ -60,28 +59,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
         webview.scrollView.bounces = false
         webview.scrollView.delegate = self
         
-        // 5. 设置窗口背景色（支持深色模式）
-        DispatchQueue.main.async {
-            self.setupWindowBackground(webview: webview)
-        }
-        
         NSLog("[EdgeToEdge] Edge-to-edge mode enabled with scroll lock")
-    }
-    
-    /// 设置窗口背景色
-    private func setupWindowBackground(webview: WKWebView) {
-        guard let window = webview.window else { return }
-        
-        if #available(iOS 13.0, *) {
-            window.backgroundColor = UIColor { traitCollection in
-                return traitCollection.userInterfaceStyle == .dark
-                    ? UIColor(red: 15/255, green: 23/255, blue: 42/255, alpha: 1)
-                    : UIColor(red: 248/255, green: 250/255, blue: 252/255, alpha: 1)
-            }
-        } else {
-            window.backgroundColor = UIColor(red: 248/255, green: 250/255, blue: 252/255, alpha: 1)
-        }
-        window.rootViewController?.view.backgroundColor = window.backgroundColor
     }
     
     /// 移除 WebView 默认的键盘监听（借鉴 Capacitor Keyboard 插件）
@@ -145,10 +123,6 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
     
     /// 键盘将要显示（借鉴 Capacitor Keyboard 插件）
     private func handleKeyboardWillShow(webview: WKWebView, notification: Notification) {
-        // 取消隐藏定时器
-        hideTimer?.invalidate()
-        hideTimer = nil
-        
         // 增加状态版本号，取消之前的延迟回调
         keyboardStateVersion += 1
         let currentVersion = keyboardStateVersion
@@ -290,35 +264,21 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
         let bottom = safeArea.bottom
         let left = safeArea.left
         
-        // 键盘显示时，底部安全区域为0（键盘已覆盖Home Indicator）
-        // 键盘隐藏时，确保最小安全区域（iPhone X 等有 Home Indicator）
-        let computedBottom: CGFloat
-        if keyboardVisible {
-            // 键盘显示时：紧贴输入框，底部安全区域为0
-            computedBottom = 0
-        } else {
-            // 键盘隐藏时：确保最小安全区域
-            computedBottom = max(bottom, 34.0)
-        }
-        
         let jsCode = """
         (function() {
             var style = document.documentElement.style;
             style.setProperty('--safe-area-inset-top', '\(top)px');
             style.setProperty('--safe-area-inset-right', '\(right)px');
-            style.setProperty('--safe-area-inset-bottom', '\(computedBottom)px');
+            style.setProperty('--safe-area-inset-bottom', '\(bottom)px');
             style.setProperty('--safe-area-inset-left', '\(left)px');
             style.setProperty('--safe-area-top', '\(top)px');
             style.setProperty('--safe-area-right', '\(right)px');
-            style.setProperty('--safe-area-bottom', '\(computedBottom)px');
+            style.setProperty('--safe-area-bottom', '\(bottom)px');
             style.setProperty('--safe-area-left', '\(left)px');
-            style.setProperty('--safe-area-bottom-computed', '\(computedBottom)px');
-            style.setProperty('--safe-area-bottom-min', '\(keyboardVisible ? 0 : 34)px');
-            style.setProperty('--content-bottom-padding', '\(computedBottom)px');
             style.setProperty('--keyboard-height', '\(keyboardHeight)px');
             style.setProperty('--keyboard-visible', '\(keyboardVisible ? "1" : "0")');
             window.dispatchEvent(new CustomEvent('safeAreaChanged', {
-                detail: { top: \(top), right: \(right), bottom: \(computedBottom), left: \(left), keyboardHeight: \(keyboardHeight), keyboardVisible: \(keyboardVisible) }
+                detail: { top: \(top), right: \(right), bottom: \(bottom), left: \(left), keyboardHeight: \(keyboardHeight), keyboardVisible: \(keyboardVisible) }
             }));
         })();
         """
