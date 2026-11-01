@@ -32,7 +32,7 @@ impl<R: Runtime> EdgeToEdge<R> {
       .run_mobile_plugin("getSafeAreaInsets", ())
       .map_err(Into::into)
   }
-  
+
   /// 启用 Edge-to-Edge
   pub fn enable(&self) -> crate::Result<()> {
     self
@@ -40,7 +40,7 @@ impl<R: Runtime> EdgeToEdge<R> {
       .run_mobile_plugin("enable", ())
       .map_err(Into::into)
   }
-  
+
   /// 禁用 Edge-to-Edge
   pub fn disable(&self) -> crate::Result<()> {
     self
@@ -48,7 +48,7 @@ impl<R: Runtime> EdgeToEdge<R> {
       .run_mobile_plugin("disable", ())
       .map_err(Into::into)
   }
-  
+
   /// 获取键盘信息
   pub fn get_keyboard_info(&self) -> crate::Result<KeyboardInfo> {
     self
@@ -56,7 +56,7 @@ impl<R: Runtime> EdgeToEdge<R> {
       .run_mobile_plugin("getKeyboardInfo", ())
       .map_err(Into::into)
   }
-  
+
   /// 显示键盘
   pub fn show_keyboard(&self) -> crate::Result<()> {
     self
@@ -64,7 +64,7 @@ impl<R: Runtime> EdgeToEdge<R> {
       .run_mobile_plugin("showKeyboard", ())
       .map_err(Into::into)
   }
-  
+
   /// 隐藏键盘
   pub fn hide_keyboard(&self) -> crate::Result<()> {
     self

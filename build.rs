@@ -1,7 +1,7 @@
 const COMMANDS: &[&str] = &[
-    "get_safe_area_insets", 
+    "get_safe_area_insets",
     "get_keyboard_info",
-    "enable", 
+    "enable",
     "disable",
     "show_keyboard",
     "hide_keyboard"

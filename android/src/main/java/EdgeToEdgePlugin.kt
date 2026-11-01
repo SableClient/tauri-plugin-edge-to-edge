@@ -8,6 +8,7 @@ import android.os.Build
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebView
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -108,7 +109,7 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    override fun onDestroy() {
+    override fun onDestroy(activity: AppCompatActivity) {
         val currentWebView = webView ?: return
 
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
@@ -126,10 +127,14 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
         println("[EdgeToEdge] Edge-to-edge mode enabled")
     }
 
+    @Suppress("DEPRECATION")
     private fun setTransparentSystemBars() {
         val window = activity.window
-        window.statusBarColor = Color.TRANSPARENT
-        window.navigationBarColor = Color.TRANSPARENT
+        // Android 15 enforces transparent bars for target SDK 35+.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            window.statusBarColor = Color.TRANSPARENT
+            window.navigationBarColor = Color.TRANSPARENT
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.isNavigationBarContrastEnforced = false
@@ -206,12 +211,6 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
                     windowInsets: WindowInsetsCompat,
                     runningAnimations: MutableList<WindowInsetsAnimationCompat>,
                 ): WindowInsetsCompat {
-                    syncInjectedInsets(
-                        currentInjectedSafeArea(windowInsets),
-                        windowInsets.isVisible(WindowInsetsCompat.Type.ime()),
-                        windowInsets.getInsets(WindowInsetsCompat.Type.ime()).bottom,
-                    )
-
                     return windowInsets
                 }
 
@@ -221,7 +220,7 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
                     val rootWindowInsets = ViewCompat.getRootWindowInsets(hostView) ?: return
                     syncInjectedInsets(
                         currentInjectedSafeArea(rootWindowInsets),
-                        rootWindowInsets.isVisible(WindowInsetsCompat.Type.ime()),
+                        isKeyboardDocked(rootWindowInsets),
                         rootWindowInsets.getInsets(WindowInsetsCompat.Type.ime()).bottom,
                     )
                 }
@@ -235,7 +234,7 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
         ViewCompat.setOnApplyWindowInsetsListener(hostView) { view, windowInsets ->
             val systemBarsInsets = windowInsets.getInsets(systemBarsAndCutoutMask())
             val imeInsets = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
-            val keyboardVisible = windowInsets.isVisible(WindowInsetsCompat.Type.ime())
+            val keyboardVisible = isKeyboardDocked(windowInsets)
             val rawSafeAreaInsets = calcSafeAreaInsets(windowInsets)
 
             cachedRawInsets = rawSafeAreaInsets.toSafeAreaInsets()
@@ -336,7 +335,7 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun calcSafeAreaInsets(windowInsets: WindowInsetsCompat): Insets {
         val safeArea = windowInsets.getInsets(systemBarsAndCutoutMask())
-        return if (windowInsets.isVisible(WindowInsetsCompat.Type.ime())) {
+        return if (isKeyboardDocked(windowInsets)) {
             Insets.of(safeArea.left, safeArea.top, safeArea.right, 0)
         } else {
             Insets.of(safeArea.left, safeArea.top, safeArea.right, safeArea.bottom)
@@ -373,6 +372,11 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
         val info = WebViewCompat.getCurrentWebViewPackage(activity)
         val versionName = info?.versionName ?: return 0
         return versionName.split(".").firstOrNull()?.toIntOrNull() ?: 0
+    }
+
+    private fun isKeyboardDocked(windowInsets: WindowInsetsCompat): Boolean {
+        return windowInsets.isVisible(WindowInsetsCompat.Type.ime()) &&
+            windowInsets.getInsets(WindowInsetsCompat.Type.ime()).bottom > 0
     }
 
     private fun getBottomInset(systemBarsInsets: Insets, keyboardVisible: Boolean): Int {

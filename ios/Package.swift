@@ -27,6 +27,10 @@ let package = Package(
             dependencies: [
                 .byName(name: "Tauri")
             ],
-            path: "Sources")
+            path: "Sources"),
+        .testTarget(
+            name: "KeyboardGeometryTests",
+            dependencies: ["tauri-plugin-edge-to-edge"],
+            path: "Tests")
     ]
 )
